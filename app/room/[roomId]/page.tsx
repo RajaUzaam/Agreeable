@@ -21,6 +21,7 @@ export default function GameRoom() {
   const [boxes, setBoxes] = useState<string[]>([]);
   const [nonMemeText, setNonMemeText] = useState('');
   const [timeLeft, setTimeLeft] = useState(30);
+  const [isSubmittied, setIsSubmitted] = useState(false);
   const [roomSettings, setRoomSettings] = useState({
     gameType: 'Quote',
     maxPlayers: 8,
@@ -175,7 +176,7 @@ export default function GameRoom() {
             };
 
       await set(subRef, payload);
-      alert('Submitted! Waiting for others...');
+      setIsSubmitted(true);
     } catch (err) {
       console.error('Submission failed:', err);
       alert('Submission error. Try again.');
@@ -231,6 +232,7 @@ export default function GameRoom() {
       >
         Submit
       </button>
+      {isSubmittied && <p className="text-green-500">Submission successful!</p>}
     </div>
   );
 }
