@@ -2,8 +2,18 @@
 
 import { useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
-import { getDatabase, ref, onValue, get, set, update } from "firebase/database";
+import {
+  getDatabase,
+  ref,
+  onValue,
+  get,
+  set,
+  update,
+  onDisconnect,
+} from "firebase/database";
 import { app } from "@/app/config/firebase";
+import { auth } from "@/app/config/auth";
+import { onAuthStateChanged } from "firebase/auth";
 import Image from "next/image";
 import { QuitButton } from "@/components/quit";
 
@@ -20,45 +30,56 @@ export default function VotePage() {
   const router = useRouter();
   const db = getDatabase(app);
 
-  const [playerName, setPlayerName] = useState("");
+  const [uid, setUid] = useState<string | null>(null);
   const [submissions, setSubmissions] = useState<Record<string, MemeSubmission>>({});
   const [captionedMemes, setCaptionedMemes] = useState<Record<string, string>>({});
   const [hasVoted, setHasVoted] = useState(false);
   const [timeLeft, setTimeLeft] = useState(45);
-
-  const isHost = typeof window !== "undefined" && localStorage.getItem("isHost") === "true";
+  const [isHost, setIsHost] = useState(false);
 
   const [roomSettings, setRoomSettings] = useState({
     gameType: "Quote",
     maxPlayers: 8,
     maxRounds: 2,
     subTime: 30,
-    voteTime: 30
+    voteTime: 30,
   });
 
   useEffect(() => {
+    const unsub = onAuthStateChanged(auth, async (user) => {
+      if (!user) return router.push("/");
+      setUid(user.uid);
+
+      const hostSnap = await get(ref(db, `rooms/${roomId}/host`));
+      if (!hostSnap.exists()) return router.push("/");
+
+      setIsHost(hostSnap.val() === user.uid);
+
+      const votedRef = ref(db, `rooms/${roomId}/currentRound/voted/${user.uid}`);
+      onValue(votedRef, (snap) => setHasVoted(snap.exists()));
+
+      if (roomId) {
+        const playerRef = ref(db, `rooms/${roomId}/players/${user.uid}`);
+        onDisconnect(playerRef).remove();
+      }
+    });
+
+    return () => unsub();
+  }, [router, db, roomId]);
+
+  useEffect(() => {
     const settingsRef = ref(db, `rooms/${roomId}/roomSettings`);
-    onValue(settingsRef, snapshot => {
+    return onValue(settingsRef, (snapshot) => {
       if (snapshot.exists()) setRoomSettings(snapshot.val());
     });
   }, [db, roomId]);
 
   useEffect(() => {
-    const name = localStorage.getItem("playerName");
-    if (!name) {
-      router.push("/");
-      return;
-    }
-    setPlayerName(name);
-
     const subsRef = ref(db, `rooms/${roomId}/currentRound/submissions`);
-    onValue(subsRef, snap => {
+    return onValue(subsRef, (snap) => {
       if (snap.exists()) setSubmissions(snap.val());
     });
-
-    const votedRef = ref(db, `rooms/${roomId}/currentRound/voted/${name}`);
-    onValue(votedRef, snap => setHasVoted(snap.exists()));
-  }, [roomId, db, router]);
+  }, [roomId, db]);
 
   useEffect(() => {
     if (roomSettings.gameType !== "Meme") return;
@@ -73,7 +94,7 @@ export default function VotePage() {
           const res = await fetch("/api/caption", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ template_id: submission.templateId, boxes: submission.boxes })
+            body: JSON.stringify({ template_id: submission.templateId, boxes: submission.boxes }),
           });
 
           const data = await res.json();
@@ -83,6 +104,7 @@ export default function VotePage() {
           console.error(`Imgflip fetch failed for ${user}:`, err);
         }
       }
+
       setCaptionedMemes(newMemes);
     };
 
@@ -102,14 +124,14 @@ export default function VotePage() {
       if (rounds >= roomSettings.maxRounds) {
         await update(ref(db, `rooms/${roomId}`), {
           status: "results",
-          currentRound: {}
+          currentRound: {},
         });
       } else {
         await update(ref(db, `rooms/${roomId}`), {
           status: "submission",
           rounds: rounds + 1,
           timeLeft: roomSettings.subTime,
-          currentRound: {}
+          currentRound: {},
         });
       }
     };
@@ -128,36 +150,37 @@ export default function VotePage() {
 
   useEffect(() => {
     const timeRef = ref(db, `rooms/${roomId}/timeLeft`);
-    const unsub = onValue(timeRef, snap => {
+    return onValue(timeRef, (snap) => {
       const val = snap.val();
       if (typeof val === "number") setTimeLeft(val);
     });
-    return () => unsub();
   }, [roomId, db]);
 
   useEffect(() => {
     const statusRef = ref(db, `rooms/${roomId}/status`);
-    const unsub = onValue(statusRef, snap => {
+    return onValue(statusRef, (snap) => {
       const status = snap.val();
       if (status === "results") router.push(`/room/${roomId}/results`);
       else if (status === "submission") router.push(`/room/${roomId}`);
     });
-    return () => unsub();
   }, [roomId, db, router]);
 
   const voteFor = async (target: string) => {
-    if (hasVoted || target === playerName) return;
+    if (!uid || hasVoted || target === uid) return;
 
     const votesRef = ref(db, `rooms/${roomId}/currentRound/submissions/${target}/votes`);
     const totalVotesRef = ref(db, `rooms/${roomId}/players/${target}/votes`);
-    const votedRef = ref(db, `rooms/${roomId}/currentRound/voted/${playerName}`);
+    const votedRef = ref(db, `rooms/${roomId}/currentRound/voted/${uid}`);
 
-    const [votesSnap, totalVotesSnap] = await Promise.all([get(votesRef), get(totalVotesRef)]);
+    const [votesSnap, totalVotesSnap] = await Promise.all([
+      get(votesRef),
+      get(totalVotesRef),
+    ]);
 
     await Promise.all([
       set(votesRef, (votesSnap.val() || 0) + 1),
       set(totalVotesRef, (totalVotesSnap.val() || 0) + 1),
-      set(votedRef, true)
+      set(votedRef, true),
     ]);
 
     setHasVoted(true);
@@ -170,14 +193,14 @@ export default function VotePage() {
       <p className="text-gray-600 mb-3">You have {timeLeft} seconds to vote.</p>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6 w-full max-w-4xl">
-        {Object.entries(submissions).map(([user, meme]) => (
-          <div key={user} className="p-4 rounded-xl bg-[#69468d] text-[#f8f6fa] border-[#c8a2c8] border-2 text-center">
-            <h3 className="font-semibold mb-2">{user}</h3>
+        {Object.entries(submissions).map(([uidKey, meme]) => (
+          <div key={uidKey} className="p-4 rounded-xl bg-[#69468d] text-[#f8f6fa] border-[#c8a2c8] border-2 text-center">
+            <h3 className="font-semibold mb-2">{uidKey === uid ? "You" : "Player"}</h3>
             {roomSettings.gameType === "Meme" ? (
               <div className="relative w-full aspect-square">
-                {captionedMemes[user] ? (
+                {captionedMemes[uidKey] ? (
                   <Image
-                    src={captionedMemes[user]}
+                    src={captionedMemes[uidKey]}
                     alt="Meme"
                     width={300}
                     height={300}
@@ -188,21 +211,21 @@ export default function VotePage() {
                 )}
               </div>
             ) : (
-              <div className="p-4 bg-gray-200 rounded-lg">
-                <p className="text-gray-800">{meme.text}</p>
+              <div className="p-2 bg-gray-200 rounded-lg text-black">
+                <span className="font-black">&quot;</span>{meme.text}<span className="font-black">&quot;</span>
               </div>
             )}
             <h1 className="text-lg mt-2">Votes: {meme.votes || 0}</h1>
             <button
-              onClick={() => voteFor(user)}
-              disabled={hasVoted || user === playerName}
+              onClick={() => voteFor(uidKey)}
+              disabled={hasVoted || uidKey === uid}
               className={`mt-3 px-4 py-2 rounded ${
-                hasVoted || user === playerName
+                hasVoted || uidKey === uid
                   ? "bg-gray-400 cursor-not-allowed"
                   : "bg-blue-600 hover:bg-blue-800 text-white"
               }`}
             >
-              {user === playerName ? "Your Meme" : "Vote"}
+              {uidKey === uid ? "Your Submission" : "Vote"}
             </button>
           </div>
         ))}

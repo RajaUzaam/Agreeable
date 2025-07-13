@@ -1,10 +1,12 @@
 'use client';
 
-import { useRouter } from "next/navigation";
-import { v4 as uuidv4 } from "uuid";
-import { getDatabase, ref, set, get, update } from "firebase/database";
-import { app } from "@/app/config/firebase";
-import { useState } from "react";
+import { useRouter } from 'next/navigation';
+import { v4 as uuidv4 } from 'uuid';
+import { getDatabase, ref, set, get, update } from 'firebase/database';
+import { app } from '@/app/config/firebase';
+import { auth } from '@/app/config/auth';
+import { onAuthStateChanged } from 'firebase/auth';
+import { useEffect, useState } from 'react';
 
 export default function Home() {
   const [rounds, setRounds] = useState(2);
@@ -14,9 +16,18 @@ export default function Home() {
   const [selectedGameType, setSelectedGameType] = useState("Quote");
   const [roomCode, setRoomCode] = useState("");
   const [playerName, setPlayerName] = useState("");
+  const [uid, setUid] = useState<string | null>(null);
 
   const router = useRouter();
   const db = getDatabase(app);
+  
+  useEffect(() => {
+    const unsub = onAuthStateChanged(auth, (user) => {
+      if (!user) router.push('/');
+      else setUid(user.uid);
+    });
+    return () => unsub();
+  }, [router]);
 
   const gameTypes = ["Meme", "Quote", "Hot-Take", "Joke"];
   const gameOptions = [
@@ -37,17 +48,18 @@ export default function Home() {
     voteTime <= 120;
 
   const handleCreateRoom = async () => {
+    if (!uid) return alert("User not authenticated.");
     if (!playerName.trim()) return alert("Please enter a username.");
     if (!validateSettings()) return alert("Please set valid game options.");
 
     const roomId = uuidv4().slice(0, 6);
-    const fullName = `${playerName.trim()} (${uuidv4().slice(0, 6)})`;
+    localStorage.setItem("roomCode", roomId);
 
     await set(ref(db, `rooms/${roomId}`), {
       createdAt: Date.now(),
-      host: fullName,
+      host: uid,
       status: "lobby",
-      Rounds: 1,
+      rounds: 1,
       roomSettings: {
         gameType: selectedGameType,
         maxPlayers,
@@ -56,36 +68,40 @@ export default function Home() {
         voteTime
       },
       players: {
-        [fullName]: { votes: 0 }
+        [uid]: { name: playerName.trim(), votes: 0 }
       },
       currentRound: {}
     });
 
-    localStorage.setItem("playerName", fullName);
+    localStorage.setItem("playerName", playerName.trim());
     localStorage.setItem("isHost", "true");
     router.push(`/room/${roomId}/lobby`);
   };
 
   const handleJoinRoom = async () => {
+    if (!uid) return alert("User not authenticated.");
     if (!playerName.trim()) return alert("Please enter a username.");
 
     const code = roomCode.trim();
-    const fullName = `${playerName.trim()} (${uuidv4().slice(0, 6)})`;
+    localStorage.setItem("roomCode", code);
 
     const roomRef = ref(db, `rooms/${code}`);
     const snapshot = await get(roomRef);
-
     if (!snapshot.exists()) return alert("Room not found.");
 
-    const data = snapshot.val();
+    const room = snapshot.val();
+    const players = room.players || {};
+    const max = room.roomSettings?.maxPlayers || 8;
 
-    if (Object.keys(data.players || {}).length >= data.roomSettings.maxPlayers)
-      return alert("Room is full.");
-    if (data.status !== "lobby") return alert("Game already started.");
+    if (Object.keys(players).length >= max) return alert("Room is full.");
+    if (room.status !== "lobby") return alert("Game already started.");
 
-    await update(ref(db, `rooms/${code}/players/${fullName}`), { votes: 0 });
+    await update(ref(db, `rooms/${code}/players/${uid}`), {
+      name: playerName.trim(),
+      votes: 0
+    });
 
-    localStorage.setItem("playerName", fullName);
+    localStorage.setItem("playerName", playerName.trim());
     localStorage.setItem("isHost", "false");
     router.push(`/room/${code}/lobby`);
   };

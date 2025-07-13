@@ -4,6 +4,8 @@ import { useRouter, useParams } from 'next/navigation';
 import { ref, getDatabase, set, onValue, update, get } from 'firebase/database';
 import { useEffect, useState } from 'react';
 import { app } from '@/app/config/firebase';
+import { auth } from '@/app/config/auth';
+import { onAuthStateChanged } from 'firebase/auth';
 import Image from 'next/image';
 import { QuitButton } from '@/components/quit';
 
@@ -12,6 +14,8 @@ export default function GameRoom() {
   const router = useRouter();
   const { roomId } = useParams();
 
+  const [uid, setUid] = useState<string | null>(null);
+  const [playerName, setPlayerName] = useState('');
   const [memeTemplate, setMemeTemplate] = useState('https://i.imgflip.com/30b1gx.jpg');
   const [templateId, setTemplateId] = useState('');
   const [boxes, setBoxes] = useState<string[]>([]);
@@ -25,8 +29,24 @@ export default function GameRoom() {
     voteTime: 30,
   });
 
-  const isHost = typeof window !== 'undefined' && localStorage.getItem('isHost') === 'true';
-  const playerName = typeof window !== 'undefined' ? localStorage.getItem('playerName') : null;
+  const [isHost, setIsHost] = useState(false);
+
+  useEffect(() => {
+    const unsub = onAuthStateChanged(auth, async (user) => {
+      if (!user) {
+        router.push('/');
+      } else {
+        setUid(user.uid);
+
+        const nameSnap = await get(ref(db, `rooms/${roomId}/players/${user.uid}/name`));
+        if (nameSnap.exists()) {
+          setPlayerName(nameSnap.val());
+        }
+      }
+    });
+
+    return () => unsub();
+  }, [router, db, roomId]);
 
   useEffect(() => {
     const settingsRef = ref(db, `rooms/${roomId}/roomSettings`);
@@ -38,15 +58,21 @@ export default function GameRoom() {
   }, [db, roomId]);
 
   useEffect(() => {
-    if (!roomId || roomSettings.gameType !== 'Meme') return;
+    if (!uid) return;
+    const roomRef = ref(db, `rooms/${roomId}/host`);
+    return onValue(roomRef, (snap) => {
+      setIsHost(snap.val() === uid);
+    });
+  }, [uid, roomId, db]);
 
+  useEffect(() => {
+    if (!roomId || roomSettings.gameType !== 'Meme') return;
     const templateRef = ref(db, `rooms/${roomId}/currentRound/template`);
 
     const initTemplate = async () => {
       try {
         const snap = await get(templateRef);
-        if (!snap.exists()) {
-          if (!isHost) return;
+        if (!snap.exists() && isHost) {
           const res = await fetch('https://api.imgflip.com/get_memes');
           const data = await res.json();
           if (!data.success || !data.data?.memes?.length) return;
@@ -61,7 +87,7 @@ export default function GameRoom() {
           setMemeTemplate(random.url);
           setTemplateId(random.id);
           setBoxes(Array(random.box_count).fill(''));
-        } else {
+        } else if (snap.exists()) {
           const val = snap.val();
           setMemeTemplate(val.url);
           setTemplateId(val.id);
@@ -72,8 +98,9 @@ export default function GameRoom() {
       }
     };
 
-    if (isHost) initTemplate();
-    else {
+    if (isHost) {
+      initTemplate();
+    } else {
       return onValue(templateRef, (snap) => {
         const val = snap.val();
         if (val) {
@@ -87,7 +114,6 @@ export default function GameRoom() {
 
   useEffect(() => {
     if (!isHost || !roomId) return;
-
     const timeRef = ref(db, `rooms/${roomId}/timeLeft`);
     let countdown = roomSettings.subTime;
 
@@ -112,6 +138,14 @@ export default function GameRoom() {
   }, [isHost, roomId, db, roomSettings.subTime, roomSettings.voteTime]);
 
   useEffect(() => {
+    const timeRef = ref(db, `rooms/${roomId}/timeLeft`);
+    return onValue(timeRef, (snap) => {
+      const val = snap.val();
+      if (typeof val === 'number') setTimeLeft(val);
+    });
+  }, [roomId, db]);
+
+  useEffect(() => {
     const statusRef = ref(db, `rooms/${roomId}/status`);
     return onValue(statusRef, (snap) => {
       if (snap.val() === 'voting') {
@@ -120,25 +154,25 @@ export default function GameRoom() {
     });
   }, [roomId, router, db]);
 
-  useEffect(() => {
-    const timeRef = ref(db, `rooms/${roomId}/timeLeft`);
-    return onValue(timeRef, (snap) => {
-      const val = snap.val();
-      if (typeof val === 'number') setTimeLeft(val);
-    });
-  }, [roomId, db]);
-
   const handleSubmit = async () => {
-    if (!roomId || !playerName) {
-      alert('Missing room ID or player name.');
-      return;
-    }
+    if (!uid) return alert('Not logged in.');
 
     try {
-      const subRef = ref(db, `rooms/${roomId}/currentRound/submissions/${playerName}`);
-      const payload = roomSettings.gameType === 'Meme'
-        ? { template: memeTemplate, templateId, boxes, votes: 0, timestamp: Date.now() }
-        : { text: nonMemeText, votes: 0, timestamp: Date.now() };
+      const subRef = ref(db, `rooms/${roomId}/currentRound/submissions/${uid}`);
+      const payload =
+        roomSettings.gameType === 'Meme'
+          ? {
+              template: memeTemplate,
+              templateId,
+              boxes,
+              votes: 0,
+              timestamp: Date.now(),
+            }
+          : {
+              text: nonMemeText,
+              votes: 0,
+              timestamp: Date.now(),
+            };
 
       await set(subRef, payload);
       alert('Submitted! Waiting for others...');
@@ -176,7 +210,7 @@ export default function GameRoom() {
         </div>
       ) : (
         <div className="flex flex-col items-center gap-4">
-          <h1 className="text-white text-2xl text-center p-4 border-white border-2">
+          <h1 className="text-white text-2xl text-center p-4 border-white rounded-md border-2">
             <span className="font-black">&quot;</span>{nonMemeText}<span className="font-black">&quot;</span>
           </h1>
           <input

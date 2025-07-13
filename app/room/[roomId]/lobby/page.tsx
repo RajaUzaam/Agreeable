@@ -1,46 +1,60 @@
 'use client';
 
 import { useRouter, useParams } from "next/navigation";
-import { getDatabase, ref, onValue, update } from "firebase/database";
+import { getDatabase, ref, onValue, update, onDisconnect } from "firebase/database";
 import { useEffect, useState } from "react";
 import { app } from "@/app/config/firebase";
+import { auth } from "@/app/config/auth";
+import { onAuthStateChanged } from "firebase/auth";
 import { QuitButton } from "@/components/quit";
 
 export default function LobbyPage() {
   const db = getDatabase(app);
   const router = useRouter();
   const { roomId } = useParams();
-  const [players, setPlayers] = useState<string[]>([]);
+
+  const [uid, setUid] = useState<string | null>(null);
   const [isHost, setIsHost] = useState(false);
+  const [players, setPlayers] = useState<{ [uid: string]: { name: string } }>({});
   const [roomSettings, setRoomSettings] = useState({
     gameType: "Quote",
     maxPlayers: 8,
     maxRounds: 2,
     subTime: 30,
-    voteTime: 30
+    voteTime: 30,
   });
 
   useEffect(() => {
-    const name = localStorage.getItem("playerName");
-    if (!name) {
-      router.push("/");
-      return;
-    }
+    const unsubscribe = onAuthStateChanged(auth, (user) => {
+      if (!user) {
+        router.push("/");
+      } else {
+        setUid(user.uid);
+        setIsHost(localStorage.getItem("isHost") === "true");
+
+        if (roomId) {
+          const playerRef = ref(db, `rooms/${roomId}/players/${user.uid}`);
+          onDisconnect(playerRef).remove();
+        }
+      }
+    });
+
+    return () => unsubscribe();
+  }, [router, roomId, db]);
+
+  useEffect(() => {
+    if (!uid) return;
 
     const roomRef = ref(db, `rooms/${roomId}`);
     const unsub = onValue(roomRef, (snapshot) => {
       const data = snapshot.val();
-      if (!data) {
+      if (!data || !data.host) {
         router.push("/");
         return;
       }
 
-      const allPlayers = Object.keys(data.players || {});
-      setPlayers(allPlayers);
-
-      const isRoomHost = data.host === name;
-      setIsHost(isRoomHost);
-      localStorage.setItem("isHost", JSON.stringify(isRoomHost));
+      setIsHost(data.host === uid);
+      setPlayers(data.players || {});
 
       if (data.status === "submission") {
         router.push(`/room/${roomId}`);
@@ -48,7 +62,7 @@ export default function LobbyPage() {
     });
 
     return () => unsub();
-  }, [db, roomId, router]);
+  }, [db, roomId, uid, router]);
 
   useEffect(() => {
     const settingsRef = ref(db, `rooms/${roomId}/roomSettings`);
@@ -67,9 +81,11 @@ export default function LobbyPage() {
       timerStart: Date.now(),
       timeLeft: roomSettings.subTime,
       rounds: 1,
-      currentRound: {}
+      currentRound: {},
     });
   };
+
+  const playerCount = Object.keys(players).length;
 
   return (
     <div className="flex flex-col items-center justify-center min-h-screen gap-4">
@@ -79,13 +95,14 @@ export default function LobbyPage() {
 
       <h2 className="text-xl">Lobby</h2>
       <p className="text-gray-500">Players joined:</p>
+
       <ul className="bg-indigo-900 p-4 rounded-lg w-64 text-center">
-        {players.map((name) => (
-          <li key={name} className="text-lg py-1">{name}</li>
+        {Object.entries(players).map(([uid, { name }]) => (
+          <li key={uid} className="text-lg py-1">{name}</li>
         ))}
       </ul>
 
-      {isHost && players.length >= 2 && players.length <= roomSettings.maxPlayers && (
+      {isHost && playerCount >= 2 && playerCount <= roomSettings.maxPlayers && (
         <button
           onClick={handleStartGame}
           className="bg-green-600 text-white px-6 py-3 rounded-xl hover:bg-green-800 mt-4"
@@ -94,7 +111,7 @@ export default function LobbyPage() {
         </button>
       )}
 
-      {players.length > roomSettings.maxPlayers && (
+      {playerCount > roomSettings.maxPlayers && (
         <p className="text-red-500">⚠ Too many players! Max {roomSettings.maxPlayers} allowed.</p>
       )}
 
